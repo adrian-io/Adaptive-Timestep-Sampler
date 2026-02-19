@@ -20,7 +20,7 @@ def run_experiment(sampler_type):
         "--eval-batch-size", "64",   # <--- Optional: Adjust batch size
         "--distributed",        # Enable distributed mode
         "--rigid-launch",       # Use the specific launch mode for this codebase
-        "--num-gpus", "2"       # Specify the number of GPUs (match CUDA_VISIBLE_DEVICES count)
+        "--num-gpus", "4"       # Specify the number of GPUs (match CUDA_VISIBLE_DEVICES count)
     ]
     
     start_time = time.time()
@@ -61,7 +61,8 @@ def run_experiment(sampler_type):
     return duration, final_fid
 
 def main():
-    strategies = ["adaptive", "uniform", "ln"]
+    # strategies = ["adaptive", "uniform", "ln"]
+    strategies = ["adaptive"]
     results = {}
     
     print("Beginning Flow Matching Comparison Sequence...")

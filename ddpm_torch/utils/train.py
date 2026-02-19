@@ -29,7 +29,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 import torch.multiprocessing as mp
-
+import time  # Added for wall clock time tracking
 
 
 class DummyScheduler:
@@ -290,7 +290,7 @@ class Trainer:
             torch.exp(diff_logvar)).mul(0.5)
         return kl
 
-    def step(self, x, e, i, global_steps=1, logger=None):
+    def step(self, x, e, i, global_steps=1, logger=None, start_time=None):
         B = x.shape[0]
         T = self.diffusion.timesteps
         is_flow_matching = hasattr(self.diffusion, "loss_type") and self.diffusion.loss_type == "flow_matching"
@@ -400,6 +400,23 @@ class Trainer:
                 if self.distributed:
                     dist.reduce(actor_loss, dst=0, op=dist.ReduceOp.SUM)
                     actor_loss.div_(self.world_size)
+                
+                # Log policy metrics
+                if logger and self.is_leader:
+                    log_payload = {
+                        "policy/alpha_mean": alpha_value.mean().item() if alpha_value is not None else 0,
+                        "policy/beta_mean": beta_value.mean().item() if beta_value is not None else 0,
+                        "policy/entropy_mean": entropy.mean().item() if entropy is not None else 0,
+                        "policy/kl_diff_sum_mean": kl_diff_sum.mean().item(),
+                        "policy/reward_mean": reward.mean().item(),
+                        "policy/actor_loss": actor_loss.item(),
+                        "epoch": e,
+                        "global_step": global_steps
+                    }
+                    if start_time is not None:
+                        log_payload["wall_clock_time"] = time.time() - start_time
+                    
+                    logger.log(log_payload, step=global_steps)
 
     def sample_fn(self, sample_size=None, noise=None, diffusion=None, sample_seed=None):
         if noise is None:
@@ -430,6 +447,8 @@ class Trainer:
             self.start_epoch, self.epochs = 0, 1
 
         global_steps = 0
+        start_time = time.time()  # Start tracking time
+
         for e in range(self.start_epoch, self.epochs):
             self.stats.reset()
             self.model.train()
@@ -443,9 +462,21 @@ class Trainer:
                     if isinstance(x, (list, tuple)):
                         x = x[0]  # unconditional model -> discard labels
                     global_steps += 1
-                    self.step(x.to(self.device), e=e, i=i, global_steps=global_steps, logger=logger)
+                    self.step(x.to(self.device), e=e, i=i, global_steps=global_steps, logger=logger, start_time=start_time)
                     t.set_postfix(self.current_stats)
                     results.update(self.current_stats)
+                    
+                    # Log training loss and time immediately if logger is present
+                    if logger and self.is_leader:
+                        current_loss = self.stats.extract().get("loss", 0)
+                        elapsed_time = time.time() - start_time
+                        logger.log({
+                            "train_loss": current_loss,
+                            "wall_clock_time": elapsed_time,
+                            "epoch": e,
+                            "global_step": global_steps
+                        }, step=global_steps)
+
                     if self.dry_run and not global_steps % self.num_accum:
                         break
 
@@ -462,12 +493,18 @@ class Trainer:
                     images = images.transpose(0, 2, 3, 1)
                     wandb_images = [logger.Image(image, caption=f"Image {i}") for i, image in enumerate(images)]
                     log_data["images"] = wandb_images
+                    # Log images with time context as well
+                    elapsed_time = time.time() - start_time
+                    log_data.update({
+                        "wall_clock_time": elapsed_time,
+                        "epoch": e,
+                        "global_step": global_steps
+                    })
                     logger.log(log_data, step=global_steps)
                     
             
             if e == self.epochs - 1:
                 # Clear cache before eval to free up VRAM
-                import torch
                 torch.cuda.empty_cache() 
                 import gc; gc.collect()
                 self.model.eval()
@@ -475,16 +512,28 @@ class Trainer:
                 if evaluator is not None:
                     eval_results = evaluator.eval(self.sample_fn, is_leader=self.is_leader)
                     if self.is_leader:
-                        logger.log({"FID": eval_results['fid']}, step=global_steps)
+                        elapsed_time = time.time() - start_time
+                        # Log FID with all x-axis metrics
+                        logger.log({
+                            "FID": eval_results['fid'],
+                            "wall_clock_time": elapsed_time,
+                            "epoch": e,
+                            "global_step": global_steps
+                        }, step=global_steps)
                         print(f"FID: {eval_results['fid']}") # Print for comparison script
                 else:
                     eval_results = dict()
                 results.update(eval_results)
 
-            if logger:
-                logger.log({"global_steps": global_steps}, step=global_steps)
-                logger.log({"epoch": e}, step=global_steps)
-                logger.log({"diffusion_timesteps": self.diffusion.timesteps}, step=global_steps)
+            if logger and self.is_leader:
+                # Redundant but ensures epoch-end logging aligns if step logging was skipped/conditional
+                elapsed_time = time.time() - start_time
+                logger.log({
+                    "global_steps": global_steps,
+                    "epoch": e,
+                    "diffusion_timesteps": self.diffusion.timesteps,
+                    "wall_clock_time": elapsed_time
+                }, step=global_steps)
 
             if self.distributed:
                 dist.barrier()  # synchronize all processes here
