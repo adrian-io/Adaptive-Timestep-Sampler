@@ -44,7 +44,8 @@ def train(rank=0, args=None, temp_dir="", replay_buffer=None):
     train_config = ConfigDict(**{
         k: gettr(k) for k in (
             "batch_size", "beta1", "beta2", "model_lr", "value_lr", "policy_lr", "epochs", "grad_norm", "warmup", "warmup_v", "warmup_pi",
-            "chkpt_intv", "image_intv", "num_samples", "use_ema", "ema_decay", "chkpt_dir", "use_baseline", "alg", "max_buffer_length", 
+            "chkpt_intv", "image_intv", "fid_intv", "fid_samples", 
+            "num_samples", "use_ema", "ema_decay", "chkpt_dir", "use_baseline", "alg", "max_buffer_length", 
             "n_features_to_select", "update_policy", "ent_coef", "clip_ratio")})
     train_config.batch_size //= args.num_accum
     train_device = torch.device(args.train_device)
@@ -238,6 +239,7 @@ def train(rank=0, args=None, temp_dir="", replay_buffer=None):
         device=train_device,
         chkpt_intv=chkpt_intv,
         image_intv=train_config.image_intv,
+        fid_intv=train_config.fid_intv,
         num_samples=train_config.num_samples,
         ema_decay=args.ema_decay,
         rank=rank,
@@ -265,7 +267,7 @@ def train(rank=0, args=None, temp_dir="", replay_buffer=None):
             dataset=dataset,
             diffusion=diffusion_eval,
             eval_batch_size=args.eval_batch_size,
-            eval_total_size=args.eval_total_size,
+            eval_total_size=train_config.fid_samples,
             device=eval_device
         )
     else:

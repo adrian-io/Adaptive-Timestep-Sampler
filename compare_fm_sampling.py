@@ -15,9 +15,7 @@ def run_experiment(sampler_type):
         "--sampler-type", sampler_type,
         "--exp-name", exp_name,
         "--exp-group", exp_group,  # NEW: Pass group name
-        "--eval",               # Enable evaluation
-        "--eval-total-size", "1000",  # <--- ADD THIS LINE
-        "--eval-batch-size", "64",   # <--- Optional: Adjust batch size
+        "--eval",               # Keep eval flag to initialize evaluator
         "--distributed",        # Enable distributed mode
         "--rigid-launch",       # Use the specific launch mode for this codebase
         "--num-gpus", "4"       # Specify the number of GPUs (match CUDA_VISIBLE_DEVICES count)

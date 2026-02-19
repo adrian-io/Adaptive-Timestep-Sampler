@@ -104,6 +104,7 @@ class Trainer:
             device=torch.device("cpu"),
             chkpt_intv=5,
             image_intv=1,
+            fid_intv=None,     # New Argument
             num_samples=64,
             ema_decay=0.9999,
             distributed=False,
@@ -144,6 +145,7 @@ class Trainer:
         self.device = device
         self.chkpt_intv = chkpt_intv
         self.image_intv = image_intv
+        self.fid_intv = fid_intv if fid_intv is not None else self.epochs + 1 # Disable if not set
         self.num_samples = num_samples
 
         self.non_zero_coef_timesteps = torch.arange(3, dtype=torch.int64, device=self.device)
@@ -480,50 +482,52 @@ class Trainer:
                     if self.dry_run and not global_steps % self.num_accum:
                         break
 
-            if (not (e + 1) % self.image_intv and self.num_samples and image_dir) or e == self.epochs-1 or e==10 or e == 19 or e == 49:
-                self.model.eval()
-                self.value_function.eval()
-                x = self.sample_fn(sample_size=self.num_samples, sample_seed=self.sample_seed)
-
-                if self.is_leader:
-                    save_image(x, os.path.join(image_dir, f"{e + 1}.jpg"), nrow=nrow)
-
-                    log_data = {}
-                    images = x.cpu().numpy()
-                    images = images.transpose(0, 2, 3, 1)
-                    wandb_images = [logger.Image(image, caption=f"Image {i}") for i, image in enumerate(images)]
-                    log_data["images"] = wandb_images
-                    # Log images with time context as well
-                    elapsed_time = time.time() - start_time
-                    log_data.update({
-                        "wall_clock_time": elapsed_time,
-                        "epoch": e,
-                        "global_step": global_steps
-                    })
-                    logger.log(log_data, step=global_steps)
-                    
+            # --- Independent Evaluation Loops ---
+            is_last_epoch = (e == self.epochs - 1)
             
-            if e == self.epochs - 1:
-                # Clear cache before eval to free up VRAM
-                torch.cuda.empty_cache() 
-                import gc; gc.collect()
-                self.model.eval()
-                self.value_function.eval()
+            # A. Image Generation
+            if (not (e + 1) % self.image_intv) or is_last_epoch:
+                if self.num_samples and image_dir:
+                    self.model.eval()
+                    self.value_function.eval()
+                    torch.cuda.empty_cache()
+                    
+                    x = self.sample_fn(sample_size=self.num_samples, sample_seed=self.sample_seed)
+
+                    if self.is_leader:
+                        save_image(x, os.path.join(image_dir, f"{e + 1}.jpg"), nrow=nrow)
+                        if logger:
+                            log_data = {}
+                            images = x.cpu().numpy().transpose(0, 2, 3, 1)
+                            wandb_images = [logger.Image(image, caption=f"Image {i}") for i, image in enumerate(images)]
+                            log_data.update({
+                                "images": wandb_images,
+                                "wall_clock_time": time.time() - start_time,
+                                "epoch": e,
+                                "global_step": global_steps
+                            })
+                            logger.log(log_data, step=global_steps)
+
+            # B. FID Evaluation
+            if (not (e + 1) % self.fid_intv) or is_last_epoch:
                 if evaluator is not None:
+                    # Memory cleanup before large FID calculation
+                    torch.cuda.empty_cache() 
+                    self.model.eval()
+                    self.value_function.eval()
+
                     eval_results = evaluator.eval(self.sample_fn, is_leader=self.is_leader)
+                    
                     if self.is_leader:
                         elapsed_time = time.time() - start_time
-                        # Log FID with all x-axis metrics
                         logger.log({
                             "FID": eval_results['fid'],
                             "wall_clock_time": elapsed_time,
                             "epoch": e,
                             "global_step": global_steps
                         }, step=global_steps)
-                        print(f"FID: {eval_results['fid']}") # Print for comparison script
-                else:
-                    eval_results = dict()
-                results.update(eval_results)
+                        print(f"FID: {eval_results['fid']}") 
+                    results.update(eval_results)
 
             if logger and self.is_leader:
                 # Redundant but ensures epoch-end logging aligns if step logging was skipped/conditional
