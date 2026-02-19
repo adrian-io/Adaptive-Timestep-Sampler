@@ -310,11 +310,33 @@ class Trainer:
                 sampled_t_input = torch.rand((B,), device=self.device)
             else:
                 sampled_t_input = torch.randint(0, T, (B,), device=self.device)
-            sampled_t = sampled_t_input # for logging/compatibility
+            sampled_t = sampled_t_input 
         elif self.sampler_type == "ln":
             z = torch.randn((B,), device=self.device)
             t_float = torch.sigmoid(z)
+            # Logit-Normal
             sampled_t_input = t_float if is_flow_matching else (t_float * (T - 1)).long()
+            sampled_t = sampled_t_input
+        elif self.sampler_type == "bernoulli":
+            # Static Bernoulli / Piecewise Constant Sampling
+            # Zone A: [0, 0.2) with prob 0.2
+            # Zone B: [0.2, 1.0] with prob 0.8
+            
+            # 1. Decide which zone for each batch element
+            zone_mask = torch.rand((B,), device=self.device) < 0.8  # True = Zone B (80%)
+            
+            # 2. Sample uniformly within zones
+            t_vals = torch.empty((B,), device=self.device)
+            
+            # Fill Zone B [0.2, 1.0]
+            # range is 0.8 wide, starts at 0.2
+            t_vals[zone_mask] = (torch.rand(zone_mask.sum(), device=self.device) * 0.8) + 0.2
+            
+            # Fill Zone A [0.0, 0.2)
+            # range is 0.2 wide, starts at 0.0
+            t_vals[~zone_mask] = (torch.rand((~zone_mask).sum(), device=self.device) * 0.2)
+            
+            sampled_t_input = t_vals if is_flow_matching else (t_vals * (T - 1)).long()
             sampled_t = sampled_t_input
 
         # 2. Pre-update calculations for Adaptive Policy (Feature Selection / Replay Buffer)

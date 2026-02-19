@@ -59,8 +59,8 @@ def run_experiment(sampler_type):
     return duration, final_fid
 
 def main():
-    # strategies = ["adaptive", "uniform", "ln"]
-    strategies = ["adaptive"]
+    # strategies = ["adaptive", "uniform", "ln", "bernoulli"]
+    strategies = ["bernoulli", "adaptive"]
     results = {}
     
     print("Beginning Flow Matching Comparison Sequence...")
