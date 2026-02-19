@@ -116,10 +116,12 @@ class Trainer:
             update_policy=20,
             ent_coef=0.0,
             clip_ratio=0.2,
+            sampler_type="adaptive"  # NEW ARGUMENT
     ):
         self.model = model
         self.value_function = value_function
         self.policy = policy
+        self.sampler_type = sampler_type  # Store sampler type
         
         self.optimizer = optimizer
         self.optimizer_v = optimizer_v
@@ -199,16 +201,39 @@ class Trainer:
     @torch.no_grad()
     def compute_singlestep_KL(self, x, sampled_t):
         mse_losses, sampled_xt, sampled_t = self.diffusion.train_losses(self.model, x, sampled_t)
+        
+        if hasattr(self.diffusion, "loss_type") and self.diffusion.loss_type == "flow_matching":
+            # For Flow Matching, use the MSE loss directly as the "cost" metric
+            # If sampled_t came from integer indices (adaptive sampler), normalize it to [0, 1]
+            if sampled_t.dtype in [torch.int32, torch.int64, torch.long]:
+                 t_in = sampled_t.float() / (self.diffusion.timesteps - 1)
+                 # Recalculate loss with correct float time
+                 mse_losses, _, _ = self.diffusion.train_losses(self.model, x, t_in)
+            
+            return mse_losses
+
         kl_divergence = self.compute_kl_divergence(x, sampled_xt, sampled_t)
         return kl_divergence
 
     @torch.no_grad()
     def calculate_kl_for_all_x0_at_t(self, sampling_timestep, x):
         kl_divergence_tensor_list = []
-        for j in sampling_timestep:
-            t_full = torch.full((x.shape[0],), j, device=self.device)
-            kl_divergence_values = self.compute_singlestep_KL(x, t_full)
-            kl_divergence_tensor_list.append(kl_divergence_values)
+        
+        # Robustly handle timestep input: convert Tensor/nested lists to flat list of scalars
+        ts = sampling_timestep
+        if isinstance(ts, torch.Tensor):
+            ts = ts.tolist()
+        if isinstance(ts, (list, tuple)) and len(ts) > 0 and isinstance(ts[0], (list, tuple)):
+            ts = [item for sublist in ts for item in sublist]
+
+        for j in ts:
+            # Ensure j is a python scalar (int/float)
+            val = j.item() if hasattr(j, "item") else j
+            
+            t_full = torch.full((x.shape[0],), val, device=self.device)
+            kl_divergence = self.compute_singlestep_KL(x, t_full)
+            kl_divergence_tensor_list.append(kl_divergence)
+            
         kl_divergence_tensor = torch.stack(kl_divergence_tensor_list).transpose(0, 1)
         return kl_divergence_tensor
 
@@ -266,15 +291,33 @@ class Trainer:
         return kl
 
     def step(self, x, e, i, global_steps=1, logger=None):
-        # Note: For DDP models, the gradients collected from different devices are averaged rather than summed.
-        # See https://pytorch.org/docs/1.12/generated/torch.nn.parallel.DistributedDataParallel.html
-        # Mean-reduced loss should be used to avoid inconsistent learning rate issue when number of devices changes.
         B = x.shape[0]
         T = self.diffusion.timesteps
+        is_flow_matching = hasattr(self.diffusion, "loss_type") and self.diffusion.loss_type == "flow_matching"
+
+        sampled_t_input = None
+        log_probs, entropy, sampled_act, alpha_value, beta_value = None, None, None, None, None
         
-        #################### BEFORE DIFFUSION UPDATE ####################
-        # KL_sum before for lasso
-        if i % self.update_policy == 0:
+        # 1. Sample Timesteps based on strategy
+        if self.sampler_type == "adaptive":
+            sampled_t, log_probs, alpha_value, beta_value, entropy, sampled_act = self.sample_timesteps(x)
+            # Use continuous sample [0,1] for FM, else discrete indices
+            sampled_t_input = sampled_act if is_flow_matching else sampled_t
+        elif self.sampler_type == "uniform":
+            if is_flow_matching:
+                sampled_t_input = torch.rand((B,), device=self.device)
+            else:
+                sampled_t_input = torch.randint(0, T, (B,), device=self.device)
+            sampled_t = sampled_t_input # for logging/compatibility
+        elif self.sampler_type == "ln":
+            z = torch.randn((B,), device=self.device)
+            t_float = torch.sigmoid(z)
+            sampled_t_input = t_float if is_flow_matching else (t_float * (T - 1)).long()
+            sampled_t = sampled_t_input
+
+        # 2. Pre-update calculations for Adaptive Policy (Feature Selection / Replay Buffer)
+        # We only do this if we are going to update the policy later
+        if self.sampler_type == "adaptive" and i % self.update_policy == 0:
             total_T = torch.arange(T, dtype=torch.int64, device=self.device)
             chunked_T = torch.chunk(total_T, self.world_size)
             range_T = chunked_T[self.rank]
@@ -284,51 +327,52 @@ class Trainer:
                 leader_x_sampled = x[random_index]
                 self.replay_buffer.add_x_sampled(leader_x_sampled)
             
-            dist.barrier()
+            if self.distributed:
+                dist.barrier()
 
             x_sampled = self.replay_buffer.x_sampled.repeat(len(range_T), 1, 1, 1)
             x_sampled = x_sampled.to(self.device)
             kl_before_for_lasso = self.compute_singlestep_KL(x_sampled, range_T)
-
-            # KL_sum before for rewardx
+            
+            # KL_sum before for reward (using all coefficients of interest)
             kl_divergence_tensor_before = self.calculate_kl_for_all_x0_at_t(self.non_zero_coef_timesteps, x)
 
-        sampled_t, log_probs, alpha_value, beta_value, entropy, sampled_act = self.sample_timesteps(x)
-
-        #################### DIFFUSION UPDATE ####################
-        dif_loss, _, _ = self.loss(x, sampled_t) # sampled_xt : x_t, sampled_t : t
+        # 3. Diffusion Update
+        dif_loss, _, _ = self.loss(x, sampled_t_input)
+        
+        if torch.isnan(dif_loss).any():
+             print(f"NaN loss detected! Steps: {global_steps}, Sampler: {self.sampler_type}")
+        
         dif_loss.mean().backward()
+        
         if global_steps % self.num_accum == 0:
-            # gradient clipping by global norm
-            # Note: In the official TF1.15+TPU implementation (clip_by_global_norm + CrossShardOptimizer)
-            # the gradient clipping operation is performed at shard level (i.e., TPU core or device level)
-            # see also https://github.com/tensorflow/tensorflow/blob/v1.15.0/tensorflow/python/tpu/tpu_optimizer.py#L114-L118
             nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=self.grad_norm)
             self.optimizer.step()
             self.optimizer.zero_grad(set_to_none=True)
             self.scheduler.step()
             if self.use_ema and hasattr(self.ema, "update"):
                 self.ema.update()
-                
+        
         dif_loss = dif_loss.detach()
         if self.distributed:
-            dist.reduce(dif_loss, dst=0, op=dist.ReduceOp.SUM)  # synchronize losses
+            dist.reduce(dif_loss, dst=0, op=dist.ReduceOp.SUM)
             dif_loss.div_(self.world_size)
         self.stats.update(B, loss=dif_loss.mean().item() * B)
         
-        #################### AFTER DIFFUSION UPDATE ####################
-        if i % self.update_policy ==0:
+        # 4. Policy Update (Adaptive Only)
+        if self.sampler_type == "adaptive" and i % self.update_policy == 0:
             kl_after_for_lasso = self.compute_singlestep_KL(x_sampled, range_T)
             kl_diff_lasso = kl_before_for_lasso - kl_after_for_lasso
             kl_diff_sum_lasso = kl_diff_lasso.sum()
 
-            # add to replay buffer 
             self.replay_buffer.sum_gpus(kl_diff_lasso, kl_diff_sum_lasso, self.rank)
-            dist.barrier()
+            if self.distributed:
+                dist.barrier()
 
             if self.is_leader:
                 self.replay_buffer.add(kl_diff_lasso, kl_diff_sum_lasso)
-            dist.barrier()
+            if self.distributed:
+                dist.barrier()
 
             kl_divergence_tensor_after = self.calculate_kl_for_all_x0_at_t(self.non_zero_coef_timesteps, x)
             kl_diff = kl_divergence_tensor_before - kl_divergence_tensor_after
@@ -338,24 +382,24 @@ class Trainer:
                 self.non_zero_coef_timesteps = self.feature_selector(self.replay_buffer.buffer_X, self.replay_buffer.buffer_y)
                 
             reward = kl_diff_sum.detach()
-            reward += self.ent_coef * entropy
+            if entropy is not None:
+                reward += self.ent_coef * entropy
 
-            actor_loss = -(log_probs * reward)
-            actor_loss = actor_loss.mean()
-            actor_loss.backward()
+            # policy grad
+            if log_probs is not None:
+                actor_loss = -(log_probs * reward)
+                actor_loss = actor_loss.mean()
+                actor_loss.backward()
 
-            nn.utils.clip_grad_norm_(self.policy.parameters(), max_norm=self.grad_norm)
-            self.optimizer_pi.step()
-            self.optimizer_pi.zero_grad()
-            self.scheduler_pi.step()
-            
-            actor_loss = actor_loss.detach()
-            if self.distributed:
-                dist.reduce(actor_loss, dst=0, op=dist.ReduceOp.SUM)  # synchronize losses
-                actor_loss.div_(self.world_size)
-
-            else:
-                raise NotImplementedError
+                nn.utils.clip_grad_norm_(self.policy.parameters(), max_norm=self.grad_norm)
+                self.optimizer_pi.step()
+                self.optimizer_pi.zero_grad()
+                self.scheduler_pi.step()
+                
+                actor_loss = actor_loss.detach()
+                if self.distributed:
+                    dist.reduce(actor_loss, dst=0, op=dist.ReduceOp.SUM)
+                    actor_loss.div_(self.world_size)
 
     def sample_fn(self, sample_size=None, noise=None, diffusion=None, sample_seed=None):
         if noise is None:
@@ -420,14 +464,19 @@ class Trainer:
                     log_data["images"] = wandb_images
                     logger.log(log_data, step=global_steps)
                     
-
-            if e == 408 or e == 816 or e == 1224 or e==1632 or e == 2039:
+            
+            if e == self.epochs - 1:
+                # Clear cache before eval to free up VRAM
+                import torch
+                torch.cuda.empty_cache() 
+                import gc; gc.collect()
                 self.model.eval()
                 self.value_function.eval()
                 if evaluator is not None:
                     eval_results = evaluator.eval(self.sample_fn, is_leader=self.is_leader)
                     if self.is_leader:
                         logger.log({"FID": eval_results['fid']}, step=global_steps)
+                        print(f"FID: {eval_results['fid']}") # Print for comparison script
                 else:
                     eval_results = dict()
                 results.update(eval_results)

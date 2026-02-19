@@ -289,3 +289,64 @@ class GaussianDiffusion:
         prior_bpd = self._prior_bpd(x_0)
         total_bpd = torch.sum(losses, dim=1) + prior_bpd
         return total_bpd, losses, prior_bpd, mses
+
+
+class FlowMatching:
+    def __init__(self, timesteps=1000, **kwargs):
+        self.timesteps = timesteps
+        self.loss_type = "flow_matching"
+        self.model_var_type = "fixed-large"  # Dummy for compatibility
+        self.model_mean_type = "v"
+
+    def train_losses(self, model, x_0, t, noise=None):
+        if noise is None:
+            noise = torch.randn_like(x_0)
+        t_b = t.reshape(-1, *([1] * (x_0.ndim - 1)))
+        
+        # Optimal Transport Conditional Flow Matching (Linear Interpolation)
+        # x_t = (1 - t) * x_0 + t * x_1
+        # t=0 -> x_0 (Data), t=1 -> x_1 (Noise)
+        x_t = (1 - t_b) * x_0 + t_b * noise
+        
+        # Target Velocity Field: u_t(x_t) = x_1 - x_0
+        target = noise - x_0
+        
+        # Scale t to [0, 1000] for sinusoidal embedding compatibility (assumes model developed for DDPM)
+        t_in = t * 1000.0
+        model_out = model(x_t, t_in)
+        
+        # Conditional Flow Matching Loss: MSE(v_pred, v_target)
+        loss = (model_out - target).pow(2).mean(dim=[1, 2, 3])
+        return loss, x_t, t
+
+    @torch.inference_mode()
+    def p_sample(self, denoise_fn, shape, device, noise=None, steps=None, seed=None):
+        # Euler ODE Solver
+        if steps is None:
+            steps = 100
+        B = shape[0]
+        rng = None
+        if seed is not None:
+            rng = torch.Generator(device).manual_seed(seed)
+            
+        # Start from Noise (t=1)
+        if noise is None:
+            x = torch.randn(shape, device=device, generator=rng)
+        else:
+            x = noise.to(device)
+        
+        # Integrate backwards from t=1 to t=0
+        dt = -1.0 / steps
+        for k in range(steps):
+            t_val = 1.0 + k * dt
+            t = torch.full((B,), t_val, device=device)
+            v = denoise_fn(x, t * 1000.0)
+            x = x + v * dt
+            
+        return x
+
+    def q_posterior_mean_var(self, x_0, x_t, t):
+        return torch.zeros_like(x_0), torch.zeros_like(x_0), torch.zeros_like(x_0)
+
+    def p_mean_var(self, *args, **kwargs):
+        return torch.zeros(1), torch.zeros(1), torch.zeros(1)

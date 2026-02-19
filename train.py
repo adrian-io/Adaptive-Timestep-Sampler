@@ -7,6 +7,7 @@ import torch.multiprocessing as mp
 from datetime import datetime
 from ddim import *
 from ddpm_torch import *
+from ddpm_torch.diffusion import FlowMatching  # Added Import
 from functools import partial
 from torch.distributed.elastic.multiprocessing import errors
 from torch.nn.parallel import DistributedDataParallel as DDP  # noqa
@@ -59,7 +60,11 @@ def train(rank=0, args=None, temp_dir="", replay_buffer=None):
     betas = get_beta_schedule(
         diffusion_config.beta_schedule, beta_start=diffusion_config.beta_start,
         beta_end=diffusion_config.beta_end, timesteps=diffusion_config.timesteps)
-    diffusion = GaussianDiffusion(betas=betas, **diffusion_config)
+
+    if train_config.alg == "flow_matching":
+        diffusion = FlowMatching(timesteps=diffusion_config.timesteps)
+    else:
+        diffusion = GaussianDiffusion(betas=betas, **diffusion_config)
 
     # extract model-specific hyperparameters
     out_channels = 2 * in_channels if diffusion_config.model_var_type == "learned" else in_channels
@@ -136,8 +141,9 @@ def train(rank=0, args=None, temp_dir="", replay_buffer=None):
 
     if is_leader:
     # Initialize wandb
-        wandb.init(project='',
-                entity="",
+        wandb.init(project='adaptive-timestep-sampler',  # Set your project name
+                group=args.exp_group,  # Group runs together
+                name=args.exp_name,    # Keep individual name
                 config={**diffusion_config, **ValueNetwork_config, **model_config, **train_config},
                 )
 
@@ -243,7 +249,8 @@ def train(rank=0, args=None, temp_dir="", replay_buffer=None):
         n_features_to_select=train_config.n_features_to_select,
         update_policy=train_config.update_policy,
         ent_coef=train_config.ent_coef,
-        clip_ratio=train_config.clip_ratio
+        clip_ratio=train_config.clip_ratio,
+        sampler_type=args.sampler_type or meta_config.get("sampler_type", "adaptive")  # Allow arg override
     )
 
     if args.use_ddim:
@@ -339,7 +346,8 @@ def main():
     parser.add_argument("--dry-run", action="store_true", help="test-run till the first model update completes")
     parser.add_argument("--capacity", default=20, type=int)
     parser.add_argument("--use_baseline", action="store_true")
-    
+    parser.add_argument("--sampler-type", choices=["adaptive", "uniform", "ln"], default=None, help="Override sampler type")
+    parser.add_argument("--exp-group", type=str, default="default_group", help="Group name for WandB runs")
 
     args = parser.parse_args()
     
@@ -353,14 +361,14 @@ def main():
         """
         As opposed to the case of rigid launch, distributed training now:
         (*: elastic launch only; **: Slurm srun only)
-         *1. handles failures by restarting all the workers 
+         *1. handles failures by restarting all the workers
          *2.1 assigns RANK and WORLD_SIZE automatically
         **2.2 sets MASTER_ADDR & MASTER_PORT manually beforehand via environment variables
          *3. allows for number of nodes change
           4. uses TCP initialization by default
         **5. supports multi-node training
         """
-        train(args=args)
+        train(args=args, replay_buffer=replay_buffer)  # Pass replay_buffer here
 
 
 if __name__ == "__main__":
