@@ -1,10 +1,52 @@
 import subprocess
 import time
 import re
+import os
+
+# --- CONFIGURE RESUME HERE ---
+# Leave values as None to start fresh.
+# If resuming, provide the WandB ID and the path to the .pt file.
+RESUME_CONFIG = {
+    "bernoulli": {
+        "wandb_id": None, # e.g., "a1b2c3d4"
+        "chkpt_path": None # e.g., "./chkpts/fm_bernoulli_final/fm_bernoulli_final_300.pt"
+    },
+    "adaptive": {
+        "wandb_id": None,
+        "chkpt_path": None
+    },
+    "uniform": {
+        "wandb_id": None,
+        "chkpt_path": None
+    },
+    "ln": {
+        "wandb_id": None,
+        "chkpt_path": None
+    }
+}
+
+# RESUME_CONFIG = {
+#     "bernoulli": {
+#         "wandb_id": """
+#         "chkpt_path": "./chkpts/fm_bernoulli_final/fm_bernoulli_final_1.pt" # e.g., "./chkpts/fm_bernoulli_final/fm_bernoulli_final_300.pt"
+#     },
+#     "adaptive": {
+#         "wandb_id": "",
+#         "chkpt_path": "./chkpts/fm_adaptive_final/fm_adaptive_final_1.pt" # e.g., "./chkpts/fm_bernoulli_final/fm_bernoulli_final_300.pt"
+#     },
+#     "uniform": {
+#         "wandb_id": None,
+#         "chkpt_path": None
+#     },
+#     "ln": {
+#         "wandb_id": None,
+#         "chkpt_path": None
+#     }
+# }
 
 def run_experiment(sampler_type):
     exp_name = f"fm_{sampler_type}_final"
-    exp_group = f"comparison_{sampler_type}"  # NEW: Define group name
+    exp_group = f"comparison_{sampler_type}" 
     print(f"==================================================")
     print(f"Starting Experiment: {sampler_type}")
     print(f"==================================================")
@@ -14,12 +56,26 @@ def run_experiment(sampler_type):
         "--config-path", "configs/cifar10_fm.json",
         "--sampler-type", sampler_type,
         "--exp-name", exp_name,
-        "--exp-group", exp_group,  # NEW: Pass group name
-        "--eval",               # Keep eval flag to initialize evaluator
-        "--distributed",        # Enable distributed mode
-        "--rigid-launch",       # Use the specific launch mode for this codebase
-        "--num-gpus", "4"       # Specify the number of GPUs (match CUDA_VISIBLE_DEVICES count)
+        "--exp-group", exp_group, 
+        "--eval",               
+        "--distributed",        
+        "--rigid-launch",       
+        "--num-gpus", "4"       
     ]
+
+    # --- INJECT RESUME ARGS ---
+    config = RESUME_CONFIG.get(sampler_type, {})
+    wandb_id = config.get("wandb_id")
+    chkpt_path = config.get("chkpt_path")
+
+    if wandb_id:
+        print(f"Resuming WandB Run: {wandb_id}")
+        cmd.extend(["--wandb-id", wandb_id])
+    
+    if chkpt_path:
+        print(f"Resuming from Checkpoint: {chkpt_path}")
+        cmd.extend(["--resume", "--chkpt-path", chkpt_path])
+    # --------------------------
     
     start_time = time.time()
     
@@ -59,8 +115,8 @@ def run_experiment(sampler_type):
     return duration, final_fid
 
 def main():
-    # strategies = ["adaptive", "uniform", "ln", "bernoulli"]
-    strategies = ["bernoulli", "adaptive"]
+    strategies = ["adaptive", "uniform", "ln", "bernoulli"]
+    # strategies = ["bernoulli", "adaptive"]
     results = {}
     
     print("Beginning Flow Matching Comparison Sequence...")

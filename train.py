@@ -27,7 +27,12 @@ def train(rank=0, args=None, temp_dir="", replay_buffer=None):
         args.config_path = os.path.join(args.config_dir, args.dataset + ".json")
     with open(args.config_path, "r") as f:
         meta_config = json.load(f)
-    exp_name = os.path.basename(args.config_path)[:-5]
+    
+    # FIX: Only derive exp_name from config if not provided in args
+    if args.exp_name:
+        exp_name = args.exp_name
+    else:
+        exp_name = os.path.basename(args.config_path)[:-5]
 
     # dataset basic info
     dataset = meta_config.get("dataset", args.dataset)
@@ -41,12 +46,26 @@ def train(rank=0, args=None, temp_dir="", replay_buffer=None):
 
     # extract training-specific hyperparameters
     gettr = partial(get_param, obj_1=meta_config.get("train", {}), obj_2=args)
+    # Note: "chkpt_dir" might be missing from config now, so provide a default
     train_config = ConfigDict(**{
         k: gettr(k) for k in (
             "batch_size", "beta1", "beta2", "model_lr", "value_lr", "policy_lr", "epochs", "grad_norm", "warmup", "warmup_v", "warmup_pi",
             "chkpt_intv", "image_intv", "fid_intv", "fid_samples", 
-            "num_samples", "use_ema", "ema_decay", "chkpt_dir", "use_baseline", "alg", "max_buffer_length", 
+            "num_samples", "use_ema", "ema_decay", "use_baseline", "alg", "max_buffer_length", 
             "n_features_to_select", "update_policy", "ent_coef", "clip_ratio")})
+    
+    # Manually handle chkpt_dir
+    # Priority: Arg > Config > Default
+    base_chkpt_dir = args.chkpt_dir or meta_config.get("train", {}).get("chkpt_dir", "./chkpts")
+
+    # Force strict separation based on Experiment Name
+    # structure: ./chkpts/<exp_group>/<exp_name>
+    # If exp_group is default, just ./chkpts/<exp_name>
+    if args.exp_group and args.exp_group != "default_group":
+         chkpt_dir = os.path.join(base_chkpt_dir, args.exp_group, exp_name)
+    else:
+         chkpt_dir = os.path.join(base_chkpt_dir, exp_name)
+
     train_config.batch_size //= args.num_accum
     train_device = torch.device(args.train_device)
     eval_device = torch.device(args.eval_device)
@@ -141,12 +160,19 @@ def train(rank=0, args=None, temp_dir="", replay_buffer=None):
     is_leader = rank == 0  # rank 0: leader in the process group
 
     if is_leader:
-    # Initialize wandb
-        wandb.init(project='adaptive-timestep-sampler',  # Set your project name
-                group=args.exp_group,  # Group runs together
-                name=args.exp_name,    # Keep individual name
-                config={**diffusion_config, **ValueNetwork_config, **model_config, **train_config},
-                )
+        # Initialize wandb
+        wandb_kwargs = {
+             "project": 'adaptive-timestep-sampler',
+             "group": args.exp_group,
+             "name": args.exp_name,
+             "config": {**diffusion_config, **ValueNetwork_config, **model_config, **train_config}
+        }
+        
+        if args.wandb_id:
+            wandb_kwargs["id"] = args.wandb_id
+            wandb_kwargs["resume"] = "must"
+        
+        wandb.init(**wandb_kwargs)
 
     logger(f"Dataset: {dataset}")
     logger(
@@ -187,13 +213,19 @@ def train(rank=0, args=None, temp_dir="", replay_buffer=None):
         args.chkpt_intv = 1
         args.image_intv = 1
 
-    chkpt_dir = os.path.join(train_config.chkpt_dir, exp_name)
+    # chkpt_dir logic moved up
     chkpt_path = os.path.join(chkpt_dir, args.chkpt_name or f"{exp_name}.pt")
     chkpt_intv = train_config.chkpt_intv
     logger(f"Checkpoint will be saved to {os.path.abspath(chkpt_path)}", end=" ")
     logger(f"every {chkpt_intv} epoch(s)")
 
-    image_dir = os.path.join(args.image_dir, "train", exp_name)
+    # Same logic for images
+    # structure: ./images/<exp_group>/<exp_name>
+    if args.exp_group and args.exp_group != "default_group":
+        image_dir = os.path.join(args.image_dir, args.exp_group, exp_name)
+    else:
+        image_dir = os.path.join(args.image_dir, exp_name)
+        
     logger(f"Generated images (x{train_config.num_samples}) will be saved to {os.path.abspath(image_dir)}", end=" ")
     logger(f"every {train_config.image_intv} epoch(s)")
 
@@ -350,6 +382,7 @@ def main():
     parser.add_argument("--use_baseline", action="store_true")
     parser.add_argument("--sampler-type", choices=["adaptive", "uniform", "ln", "bernoulli"], default=None, help="Override sampler type")
     parser.add_argument("--exp-group", type=str, default="default_group", help="Group name for WandB runs")
+    parser.add_argument("--wandb-id", type=str, default=None, help="WandB Run ID to resume from")
 
     args = parser.parse_args()
     
