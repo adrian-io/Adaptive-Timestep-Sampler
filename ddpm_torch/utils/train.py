@@ -317,13 +317,13 @@ class Trainer:
             # Logit-Normal
             sampled_t_input = t_float if is_flow_matching else (t_float * (T - 1)).long()
             sampled_t = sampled_t_input
-        elif self.sampler_type == "bernoulli":
+        elif self.sampler_type == "bernoulli90":
             # Static Bernoulli / Piecewise Constant Sampling
-            # Zone A: [0, 0.2) with prob 0.2
-            # Zone B: [0.2, 1.0] with prob 0.8
+            # Zone A: [0, 0.2) with prob 0.1
+            # Zone B: [0.2, 1.0] with prob 0.9
             
             # 1. Decide which zone for each batch element
-            zone_mask = torch.rand((B,), device=self.device) < 0.8  # True = Zone B (80%)
+            zone_mask = torch.rand((B,), device=self.device) < 0.9  # True = Zone B (90%)
             
             # 2. Sample uniformly within zones
             t_vals = torch.empty((B,), device=self.device)
@@ -335,6 +335,78 @@ class Trainer:
             # Fill Zone A [0.0, 0.2)
             # range is 0.2 wide, starts at 0.0
             t_vals[~zone_mask] = (torch.rand((~zone_mask).sum(), device=self.device) * 0.2)
+            
+            sampled_t_input = t_vals if is_flow_matching else (t_vals * (T - 1)).long()
+            sampled_t = sampled_t_input
+
+        elif self.sampler_type == "bernoulli95":
+            # Zone A: [0, 0.2) with prob 0.05
+            # Zone B: [0.2, 1.0] with prob 0.95
+            
+            zone_mask = torch.rand((B,), device=self.device) < 0.95  # True = Zone B (95%)
+            t_vals = torch.empty((B,), device=self.device)
+            t_vals[zone_mask] = (torch.rand(zone_mask.sum(), device=self.device) * 0.8) + 0.2
+            t_vals[~zone_mask] = (torch.rand((~zone_mask).sum(), device=self.device) * 0.2)
+            
+            sampled_t_input = t_vals if is_flow_matching else (t_vals * (T - 1)).long()
+            sampled_t = sampled_t_input
+
+        elif self.sampler_type == "bernoulli_inv90":
+            # Inverse Bernoulli 90%
+            # Zone A: [0, 0.8) with prob 0.9 (Noise area)
+            # Zone B: [0.8, 1.0] with prob 0.1
+            
+            zone_mask = torch.rand((B,), device=self.device) < 0.9  # True = Zone A (90%)
+            t_vals = torch.empty((B,), device=self.device)
+            
+            # Fill Zone A [0.0, 0.8)
+            t_vals[zone_mask] = (torch.rand(zone_mask.sum(), device=self.device) * 0.8)
+            
+            # Fill Zone B [0.8, 1.0]
+            t_vals[~zone_mask] = (torch.rand((~zone_mask).sum(), device=self.device) * 0.2) + 0.8
+            
+            sampled_t_input = t_vals if is_flow_matching else (t_vals * (T - 1)).long()
+            sampled_t = sampled_t_input
+
+        elif self.sampler_type == "bernoulli_inv95":
+            # Inverse Bernoulli 95%
+            # Zone A: [0, 0.8) with prob 0.95 (Noise area)
+            # Zone B: [0.8, 1.0] with prob 0.05
+            
+            zone_mask = torch.rand((B,), device=self.device) < 0.95  # True = Zone A (95%)
+            t_vals = torch.empty((B,), device=self.device)
+            
+            # Fill Zone A [0.0, 0.8)
+            t_vals[zone_mask] = (torch.rand(zone_mask.sum(), device=self.device) * 0.8)
+            
+            # Fill Zone B [0.8, 1.0]
+            t_vals[~zone_mask] = (torch.rand((~zone_mask).sum(), device=self.device) * 0.2) + 0.8
+            
+            sampled_t_input = t_vals if is_flow_matching else (t_vals * (T - 1)).long()
+            sampled_t = sampled_t_input
+
+        # NEW: Beta Noise Strategy (Biased towards t=0, which is NOISE)
+        elif self.sampler_type == "beta_noise":
+            # Fixed Beta Distribution (alpha=0.8, beta=1.0)
+            # PDF ~ x^-0.2, high prob near 0
+            dist = torch.distributions.Beta(
+                torch.tensor([0.8], device=self.device), 
+                torch.tensor([1.0], device=self.device)
+            )
+            t_vals = dist.sample((B,)).squeeze(-1)
+            sampled_t_input = t_vals if is_flow_matching else (t_vals * (T - 1)).long()
+            sampled_t = sampled_t_input
+
+        # NEW: Beta Data Strategy (Biased towards t=1, which is DATA)
+        elif self.sampler_type == "beta_data":
+            # Fixed Beta Distribution (alpha=1.0, beta=0.8)
+            # PDF ~ (1-x)^-0.2, high prob near 1
+            dist = torch.distributions.Beta(
+                torch.tensor([1.0], device=self.device), 
+                torch.tensor([0.8], device=self.device)
+            )
+            # Sample B times
+            t_vals = dist.sample((B,)).squeeze(-1)
             
             sampled_t_input = t_vals if is_flow_matching else (t_vals * (T - 1)).long()
             sampled_t = sampled_t_input

@@ -7,9 +7,21 @@ import os
 # Leave values as None to start fresh.
 # If resuming, provide the WandB ID and the path to the .pt file.
 RESUME_CONFIG = {
-    "bernoulli": {
+    "bernoulli90": {
         "wandb_id": None, # e.g., "a1b2c3d4"
-        "chkpt_path": None # e.g., "./chkpts/fm_bernoulli_final/fm_bernoulli_final_300.pt"
+        "chkpt_path": None # e.g., "./chkpts/fm_bernoulli90_final/fm_bernoulli90_final_300.pt"
+    },
+    "bernoulli95": {
+        "wandb_id": None,
+        "chkpt_path": None
+    },
+    "bernoulli_inv90": {
+        "wandb_id": None,
+        "chkpt_path": None
+    },
+    "bernoulli_inv95": {
+        "wandb_id": None,
+        "chkpt_path": None
     },
     "adaptive": {
         "wandb_id": None,
@@ -22,27 +34,17 @@ RESUME_CONFIG = {
     "ln": {
         "wandb_id": None,
         "chkpt_path": None
+    },
+    # Updated keys
+    "beta_noise": {
+        "wandb_id": None,
+        "chkpt_path": None
+    },
+    "beta_data": {
+        "wandb_id": None,
+        "chkpt_path": None
     }
 }
-
-# RESUME_CONFIG = {
-#     "bernoulli": {
-#         "wandb_id": """
-#         "chkpt_path": "./chkpts/fm_bernoulli_final/fm_bernoulli_final_1.pt" # e.g., "./chkpts/fm_bernoulli_final/fm_bernoulli_final_300.pt"
-#     },
-#     "adaptive": {
-#         "wandb_id": "",
-#         "chkpt_path": "./chkpts/fm_adaptive_final/fm_adaptive_final_1.pt" # e.g., "./chkpts/fm_bernoulli_final/fm_bernoulli_final_300.pt"
-#     },
-#     "uniform": {
-#         "wandb_id": None,
-#         "chkpt_path": None
-#     },
-#     "ln": {
-#         "wandb_id": None,
-#         "chkpt_path": None
-#     }
-# }
 
 def run_experiment(sampler_type):
     exp_name = f"fm_{sampler_type}_final"
@@ -115,8 +117,8 @@ def run_experiment(sampler_type):
     return duration, final_fid
 
 def main():
-    strategies = ["adaptive", "uniform", "ln", "bernoulli"]
-    # strategies = ["bernoulli", "adaptive"]
+    # strategies = ["adaptive", "uniform", "ln", "bernoulli90", "bernoulli95", "bernoulli_inv90", "bernoulli_inv95", "beta_noise", "beta_data"]
+    strategies = ["beta_data", "bernoulli90", "beta_noise", "bernoulli95", "bernoulli_inv90", "bernoulli_inv95"]
     results = {}
     
     print("Beginning Flow Matching Comparison Sequence...")

@@ -380,7 +380,7 @@ def main():
     parser.add_argument("--dry-run", action="store_true", help="test-run till the first model update completes")
     parser.add_argument("--capacity", default=20, type=int)
     parser.add_argument("--use_baseline", action="store_true")
-    parser.add_argument("--sampler-type", choices=["adaptive", "uniform", "ln", "bernoulli"], default=None, help="Override sampler type")
+    parser.add_argument("--sampler-type", choices=["adaptive", "uniform", "ln", "bernoulli90", "bernoulli95", "bernoulli_inv90", "bernoulli_inv95", "beta_noise", "beta_data"], default=None, help="Override sampler type")
     parser.add_argument("--exp-group", type=str, default="default_group", help="Group name for WandB runs")
     parser.add_argument("--wandb-id", type=str, default=None, help="WandB Run ID to resume from")
 
