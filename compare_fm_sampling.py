@@ -43,6 +43,10 @@ RESUME_CONFIG = {
     "beta_data": {
         "wandb_id": None,
         "chkpt_path": None
+    },
+    "a2c_ats": {          
+        "wandb_id": None,
+        "chkpt_path": None
     }
 }
 
@@ -117,8 +121,9 @@ def run_experiment(sampler_type):
     return duration, final_fid
 
 def main():
-    # strategies = ["adaptive", "uniform", "ln", "bernoulli90", "bernoulli95", "bernoulli_inv90", "bernoulli_inv95", "beta_noise", "beta_data"]
-    strategies = ["beta_data", "bernoulli90", "beta_noise", "bernoulli95", "bernoulli_inv90", "bernoulli_inv95"]
+    # strategies = ["adaptive", "uniform", "ln", "a2c_ats", "bernoulli90", "bernoulli95", "bernoulli_inv90", "bernoulli_inv95", "beta_noise", "beta_data"]
+    strategies = ["a2c_ats", "bernoulli_inv95"]
+    # strategies = ["bernoulli90", "bernoulli95", "bernoulli_inv90", "bernoulli_inv95"]
     results = {}
     
     print("Beginning Flow Matching Comparison Sequence...")

@@ -122,8 +122,7 @@ class Trainer:
         self.model = model
         self.value_function = value_function
         self.policy = policy
-        self.sampler_type = sampler_type  # Store sampler type
-        
+        self.sampler_type = sampler_type
         self.optimizer = optimizer
         self.optimizer_v = optimizer_v
         self.optimizer_pi = optimizer_pi
@@ -276,7 +275,6 @@ class Trainer:
 
         return selected_features_indices.tolist(),
 
-
     def compute_kl_divergence(self, x, sampled_xt, sampled_t):
         q_mean, q_var, q_logvar = self.diffusion.q_posterior_mean_var(x, sampled_xt, sampled_t)
         p_mean, p_var, p_logvar = self.diffusion.p_mean_var(self.model, sampled_xt, sampled_t, clip_denoised=False, return_pred=False)
@@ -296,12 +294,13 @@ class Trainer:
         B = x.shape[0]
         T = self.diffusion.timesteps
         is_flow_matching = hasattr(self.diffusion, "loss_type") and self.diffusion.loss_type == "flow_matching"
+        is_adaptive_like = self.sampler_type in ["adaptive", "a2c_ats"]
 
         sampled_t_input = None
         log_probs, entropy, sampled_act, alpha_value, beta_value = None, None, None, None, None
         
         # 1. Sample Timesteps based on strategy
-        if self.sampler_type == "adaptive":
+        if is_adaptive_like:
             sampled_t, log_probs, alpha_value, beta_value, entropy, sampled_act = self.sample_timesteps(x)
             # Use continuous sample [0,1] for FM, else discrete indices
             sampled_t_input = sampled_act if is_flow_matching else sampled_t
@@ -413,7 +412,7 @@ class Trainer:
 
         # 2. Pre-update calculations for Adaptive Policy (Feature Selection / Replay Buffer)
         # We only do this if we are going to update the policy later
-        if self.sampler_type == "adaptive" and i % self.update_policy == 0:
+        if is_adaptive_like and i % self.update_policy == 0:
             total_T = torch.arange(T, dtype=torch.int64, device=self.device)
             chunked_T = torch.chunk(total_T, self.world_size)
             range_T = chunked_T[self.rank]
@@ -434,7 +433,14 @@ class Trainer:
             kl_divergence_tensor_before = self.calculate_kl_for_all_x0_at_t(self.non_zero_coef_timesteps, x)
 
         # 3. Diffusion Update
-        dif_loss, _, _ = self.loss(x, sampled_t_input)
+        # DETACH sampled_t_input to prevent gradients flowing back into policy/sampler
+        # during diffusion loss backward pass.
+        if torch.is_tensor(sampled_t_input):
+            t_input_for_diffusion = sampled_t_input.detach()
+        else:
+            t_input_for_diffusion = sampled_t_input
+
+        dif_loss, _, _ = self.loss(x, t_input_for_diffusion)
         
         if torch.isnan(dif_loss).any():
              print(f"NaN loss detected! Steps: {global_steps}, Sampler: {self.sampler_type}")
@@ -456,7 +462,7 @@ class Trainer:
         self.stats.update(B, loss=dif_loss.mean().item() * B)
         
         # 4. Policy Update (Adaptive Only)
-        if self.sampler_type == "adaptive" and i % self.update_policy == 0:
+        if is_adaptive_like and i % self.update_policy == 0:
             kl_after_for_lasso = self.compute_singlestep_KL(x_sampled, range_T)
             kl_diff_lasso = kl_before_for_lasso - kl_after_for_lasso
             kl_diff_sum_lasso = kl_diff_lasso.sum()
@@ -481,10 +487,35 @@ class Trainer:
             if entropy is not None:
                 reward += self.ent_coef * entropy
 
+            if self.sampler_type == "a2c_ats":
+                # Value Network estimates expected reward of image x
+                baseline_value = self.value_function(x).squeeze()
+
+                # 1. Critic Update (MSE Loss)
+                # target for value function should be detached to prevent backprop into policy (via entropy in reward)
+                value_loss = self.mse_loss(baseline_value, reward.detach())
+                value_loss.backward()
+                nn.utils.clip_grad_norm_(self.value_function.parameters(), max_norm=self.grad_norm)
+                self.optimizer_v.step()
+                self.optimizer_v.zero_grad()
+                self.scheduler_v.step()
+                
+                value_loss_item = value_loss.detach().item()
+            
+            else:
+                baseline_value = torch.zeros_like(reward)
+                value_loss_item = 0.0
+    
+            advantage = reward - baseline_value.detach()
+            # 3. The Entropy Injection (Coupled into the Advantage)
+            if entropy is not None:
+                reward_eff = advantage + (self.ent_coef * entropy)
+            else:
+                reward_eff = advantage
+            
             # policy grad
             if log_probs is not None:
-                actor_loss = -(log_probs * reward)
-                actor_loss = actor_loss.mean()
+                actor_loss = -(log_probs * reward_eff).mean()
                 actor_loss.backward()
 
                 nn.utils.clip_grad_norm_(self.policy.parameters(), max_norm=self.grad_norm)
@@ -504,8 +535,10 @@ class Trainer:
                         "policy/beta_mean": beta_value.mean().item() if beta_value is not None else 0,
                         "policy/entropy_mean": entropy.mean().item() if entropy is not None else 0,
                         "policy/kl_diff_sum_mean": kl_diff_sum.mean().item(),
-                        "policy/reward_mean": reward.mean().item(),
+                        "policy/advantage_mean": advantage.mean().item(),
+                        "policy/reward_eff_mean": reward_eff.mean().item(),
                         "policy/actor_loss": actor_loss.item(),
+                        "policy/value_loss": value_loss_item,
                         "epoch": e,
                         "global_step": global_steps
                     }

@@ -94,10 +94,23 @@ def train(rank=0, args=None, temp_dir="", replay_buffer=None):
     model_config["out_channels"] = out_channels * block_size ** 2
     _model = UNet(**model_config)
     
+    # Determine sampler type from args
+    sampler_type = args.sampler_type
+
     ValueNetwork_config = meta_config["ValueNetwork"]
+    # Only initialize ValueNetwork if strictly needed for a2c_ats
+    if sampler_type == "a2c_ats":
+        ValueNetwork_config["initialize"] = True
+    else:
+        ValueNetwork_config["initialize"] = False
     _mlp_net = ValueNetwork(**ValueNetwork_config)
 
     ActorNetwork_config = meta_config["ActorNetwork"]
+    # Initialize ActorNetwork for adaptive or a2c_ats
+    if sampler_type in ["adaptive", "a2c_ats"]:
+        ActorNetwork_config["initialize"] = True
+    else:
+        ActorNetwork_config["initialize"] = False
     _policy = ActorNetwork(**ActorNetwork_config)
 
     if block_size > 1:
@@ -284,7 +297,7 @@ def train(rank=0, args=None, temp_dir="", replay_buffer=None):
         update_policy=train_config.update_policy,
         ent_coef=train_config.ent_coef,
         clip_ratio=train_config.clip_ratio,
-        sampler_type=args.sampler_type or meta_config.get("sampler_type", "adaptive")  # Allow arg override
+        sampler_type=args.sampler_type
     )
 
     if args.use_ddim:
@@ -380,7 +393,7 @@ def main():
     parser.add_argument("--dry-run", action="store_true", help="test-run till the first model update completes")
     parser.add_argument("--capacity", default=20, type=int)
     parser.add_argument("--use_baseline", action="store_true")
-    parser.add_argument("--sampler-type", choices=["adaptive", "uniform", "ln", "bernoulli90", "bernoulli95", "bernoulli_inv90", "bernoulli_inv95", "beta_noise", "beta_data"], default=None, help="Override sampler type")
+    parser.add_argument("--sampler-type", choices=["adaptive", "a2c_ats", "uniform", "ln", "bernoulli90", "bernoulli95", "bernoulli_inv90", "bernoulli_inv95", "beta_noise", "beta_data"], default=None, help="Override sampler type")
     parser.add_argument("--exp-group", type=str, default="default_group", help="Group name for WandB runs")
     parser.add_argument("--wandb-id", type=str, default=None, help="WandB Run ID to resume from")
 
