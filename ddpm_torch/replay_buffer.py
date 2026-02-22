@@ -24,7 +24,7 @@ class SharedMemoryManager:
         self.store_kl_diff[rank] = kl_diff_lasso
         self.store_kl_diff_sum[rank] = kl_diff_sum_lasso
 
-    def add(self, X, y):
+    def add(self):
         X = self.store_kl_diff.flatten()
         y = self.store_kl_diff_sum.sum()
 

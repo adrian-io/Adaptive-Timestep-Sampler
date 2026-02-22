@@ -389,11 +389,11 @@ class Trainer:
         elif self.sampler_type == "beta_noise":
             # Fixed Beta Distribution (alpha=0.8, beta=1.0)
             # PDF ~ x^-0.2, high prob near 0
-            dist = torch.distributions.Beta(
+            beta_dist = torch.distributions.Beta(
                 torch.tensor([0.8], device=self.device), 
                 torch.tensor([1.0], device=self.device)
             )
-            t_vals = dist.sample((B,)).squeeze(-1)
+            t_vals = beta_dist.sample((B,)).squeeze(-1)
             sampled_t_input = t_vals if is_flow_matching else (t_vals * (T - 1)).long()
             sampled_t = sampled_t_input
 
@@ -401,12 +401,12 @@ class Trainer:
         elif self.sampler_type == "beta_data":
             # Fixed Beta Distribution (alpha=1.0, beta=0.8)
             # PDF ~ (1-x)^-0.2, high prob near 1
-            dist = torch.distributions.Beta(
+            beta_dist = torch.distributions.Beta(
                 torch.tensor([1.0], device=self.device), 
                 torch.tensor([0.8], device=self.device)
             )
             # Sample B times
-            t_vals = dist.sample((B,)).squeeze(-1)
+            t_vals = beta_dist.sample((B,)).squeeze(-1)
             
             sampled_t_input = t_vals if is_flow_matching else (t_vals * (T - 1)).long()
             sampled_t = sampled_t_input
@@ -466,7 +466,7 @@ class Trainer:
                 dist.barrier()
 
             if self.is_leader:
-                self.replay_buffer.add(kl_diff_lasso, kl_diff_sum_lasso)
+                self.replay_buffer.add()
             if self.distributed:
                 dist.barrier()
 
