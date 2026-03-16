@@ -98,7 +98,7 @@ def plot_beta_distributions(df, epoch_interval=25):
     selected_epochs = selected_epochs.drop_duplicates(subset=["epoch"])
 
     x = np.linspace(0, 1, 500)
-    plt.figure(figsize=(12, 8))
+    plt.figure(figsize=(6, 6))
     
     # Color palette
     colors = plt.cm.viridis(np.linspace(0, 1, len(selected_epochs)))
@@ -116,7 +116,8 @@ def plot_beta_distributions(df, epoch_interval=25):
     plt.title(f"Evolution of Adaptive Sampler Policy (Every {epoch_interval} Epochs)")
     plt.xlabel("Timestep $t$ (normalized [0,1])")
     plt.ylabel("Probability Density")
-    plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+    # plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+    plt.legend()
     plt.grid(True, alpha=0.3)
     plt.tight_layout()
     plt.savefig("beta_dist_evolution.png")
